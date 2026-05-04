@@ -68,6 +68,38 @@ pi-profile --list
 pi-profile --dir work
 ```
 
+## Shell shortcuts
+
+For shorter commands, add shell functions to your `~/.zshrc`, `~/.bashrc`, or equivalent:
+
+```bash
+pi_work() {
+    pi-profile work "$@"
+}
+
+pi_personal() {
+    pi-profile personal "$@"
+}
+```
+
+Then use them like the launcher:
+
+```bash
+pi_work
+pi_work --model claude-sonnet-4-5
+pi_personal -p "Summarize this repo"
+```
+
+You can also generate these functions:
+
+```bash
+# Generate functions for existing profile directories
+pi-profile --shell >> ~/.zshrc
+
+# Or name profiles explicitly
+pi-profile --shell work personal >> ~/.zshrc
+```
+
 Inside Pi, run:
 
 ```text

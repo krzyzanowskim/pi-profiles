@@ -57,6 +57,7 @@ Usage:
   pi-profile <profile> [pi args...]
   pi-profile --list
   pi-profile --dir <profile>
+  pi-profile --shell [profile...]
 
 pi-profile options:
   --allow-env-auth             Preserve shell API-key environment variables
@@ -65,6 +66,7 @@ Examples:
   pi-profile personal
   pi-profile work --model claude-sonnet-4-5
   pi-profile work -p "Summarize this repo"
+  pi-profile --shell work personal >> ~/.zshrc
 
 Profiles live in:
   ${profilesBaseDir()}/<profile>
@@ -133,6 +135,43 @@ function listProfiles() {
     .sort();
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function shellFunctionName(profile) {
+  return `pi_${profile.replace(/[^A-Za-z0-9_]/g, "_")}`;
+}
+
+function printShellIntegration(profiles) {
+  if (profiles.length === 0) {
+    console.log(`# No profiles found in ${profilesBaseDir()}.
+# Pass names explicitly, for example:
+#   pi-profile --shell work personal >> ~/.zshrc`);
+    return;
+  }
+
+  const usedNames = new Map();
+  for (const profile of profiles) {
+    validateProfileName(profile);
+    const name = shellFunctionName(profile);
+    const existing = usedNames.get(name);
+    if (existing) {
+      fail(`profiles "${existing}" and "${profile}" both map to shell function "${name}"`);
+    }
+    usedNames.set(name, profile);
+  }
+
+  console.log(`# pi-profile shell shortcuts
+# Add this to ~/.zshrc, ~/.bashrc, or another shell startup file.`);
+  for (const profile of profiles) {
+    console.log(`
+${shellFunctionName(profile)}() {
+  pi-profile ${shellQuote(profile)} "$@"
+}`);
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
@@ -151,6 +190,11 @@ function main() {
     if (!profile) fail("--dir requires a profile name");
     validateProfileName(profile);
     console.log(join(profilesBaseDir(), profile));
+    return;
+  }
+
+  if (argv[0] === "--shell") {
+    printShellIntegration(argv.slice(1).length ? argv.slice(1) : listProfiles());
     return;
   }
 
