@@ -1,0 +1,56 @@
+{
+  "name": "@krzyzanowskim/pi-profiles",
+  "version": "0.1.0",
+  "description": "Run Pi with isolated auth profiles while sharing the standard session store.",
+  "type": "module",
+  "bin": {
+    "pi-profile": "./bin/pi-profile.js"
+  },
+  "files": [
+    "bin/",
+    "extensions/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node ./scripts/check-package.js",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/auth-profile.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "auth",
+    "profiles",
+    "oauth"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/krzyzanowskim/pi-profiles.git"
+  },
+  "bugs": {
+    "url": "https://github.com/krzyzanowskim/pi-profiles/issues"
+  },
+  "homepage": "https://github.com/krzyzanowskim/pi-profiles#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.72.1"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}
