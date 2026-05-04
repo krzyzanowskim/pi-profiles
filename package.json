@@ -1,6 +1,6 @@
 {
   "name": "@krzyzanowskim/pi-profiles",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run Pi with isolated auth profiles while sharing the standard session store.",
   "type": "module",
   "bin": {
