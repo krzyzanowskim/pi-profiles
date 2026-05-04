@@ -4,7 +4,7 @@
   "description": "Run Pi with isolated auth profiles while sharing the standard session store.",
   "type": "module",
   "bin": {
-    "pi-profile": "./bin/pi-profile.js"
+    "pi-profile": "bin/pi-profile.js"
   },
   "files": [
     "bin/",
