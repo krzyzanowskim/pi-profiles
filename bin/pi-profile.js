@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
+
 const KNOWN_AUTH_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_OAUTH_TOKEN",
@@ -245,7 +247,11 @@ function main() {
   }
 
   const piBinary = process.env.PI_BINARY || "pi";
-  const child = spawn(piBinary, ["--auth-profile", profile, "--extension", extensionPath, ...piArgs], {
+  const childArgs = PI_SUBCOMMANDS.has(piArgs[0])
+    ? piArgs
+    : ["--auth-profile", profile, "--extension", extensionPath, ...piArgs];
+
+  const child = spawn(piBinary, childArgs, {
     stdio: "inherit",
     env,
   });

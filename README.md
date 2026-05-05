@@ -63,6 +63,10 @@ pi-profile work
 pi-profile work --model claude-sonnet-4-5
 pi-profile work -p "Summarize this repo"
 
+# Use normal Pi package commands with the profile's settings directory
+pi-profile work list
+pi-profile work install <source>
+
 # Show profile directories
 pi-profile --list
 pi-profile --dir work
@@ -162,6 +166,15 @@ pi-profile work
 ```
 
 Normal Pi `--session-dir <dir>` still works and takes precedence for that run, but you do not need it for profile sharing.
+
+## Pi package commands
+
+Pi package commands such as `list`, `install`, `remove`, `uninstall`, `update`, and `config` must be the first argument passed to the real `pi` binary. The launcher preserves that shape, so commands like this work like regular Pi while using the selected profile's settings directory:
+
+```bash
+pi-profile work list
+pi-profile work install <source>
+```
 
 ## Publishing
 
