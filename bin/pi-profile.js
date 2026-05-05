@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
+const DEFAULT_SYNC_KEYS = ["packages", "npmCommand"];
+const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
 
 const KNOWN_AUTH_ENV = [
   "ANTHROPIC_API_KEY",
@@ -145,6 +147,110 @@ function shellFunctionName(profile) {
   return `pi_${profile.replace(/[^A-Za-z0-9_]/g, "_")}`;
 }
 
+function readJsonFile(path, fallback = {}, options = {}) {
+  if (!existsSync(path)) return fallback;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (options.warnOnly) {
+      console.error(`pi-profile: warning: failed to read ${path}: ${error.message}`);
+      return fallback;
+    }
+    fail(`failed to read ${path}: ${error.message}`);
+  }
+}
+
+function writeJsonFile(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  renameSync(tmp, path);
+}
+
+function profileDirForName(profile) {
+  if (profile === "default") return resolve(expandHome("~/.pi/agent"));
+  validateProfileName(profile);
+  return join(profilesBaseDir(), profile);
+}
+
+function profileSyncConfigPath(profileDir) {
+  return join(profileDir, "profile-sync.json");
+}
+
+function isLocalSource(source) {
+  return source === "." || source === ".." || source.startsWith("./") || source.startsWith("../") || source.startsWith("/") || source.startsWith("~/");
+}
+
+function absolutizePath(value, baseDir) {
+  if (value === "~" || value.startsWith("~/")) return resolve(expandHome(value));
+  if (isAbsolute(value)) return value;
+  return resolve(baseDir, value);
+}
+
+function absolutizePattern(value, baseDir) {
+  const prefix = value.startsWith("!") || value.startsWith("+") || value.startsWith("-") ? value.slice(0, 1) : "";
+  const body = prefix ? value.slice(1) : value;
+  if (!body || body.startsWith("*") || body.startsWith("?")) return value;
+  return `${prefix}${absolutizePath(body, baseDir)}`;
+}
+
+function normalizeSyncedValue(key, value, sourceDir) {
+  if (key === "packages" && Array.isArray(value)) {
+    return value.map((entry) => {
+      if (typeof entry === "string") return isLocalSource(entry) ? absolutizePath(entry, sourceDir) : entry;
+      if (!entry || typeof entry !== "object" || typeof entry.source !== "string") return entry;
+      return {
+        ...entry,
+        source: isLocalSource(entry.source) ? absolutizePath(entry.source, sourceDir) : entry.source,
+      };
+    });
+  }
+
+  if (RESOURCE_SYNC_KEYS.has(key) && Array.isArray(value)) {
+    return value.map((entry) => (typeof entry === "string" ? absolutizePattern(entry, sourceDir) : entry));
+  }
+
+  return value;
+}
+
+function applyProfileSync(targetProfile) {
+  const targetDir = profileDirForName(targetProfile);
+  const configPath = profileSyncConfigPath(targetDir);
+  if (!existsSync(configPath)) return;
+
+  const config = readJsonFile(configPath, {}, { warnOnly: true });
+  if (config.enabled === false) return;
+
+  const sourceProfile = typeof config.from === "string" && config.from.trim() ? config.from.trim() : "default";
+  const keys = Array.isArray(config.keys) ? config.keys : DEFAULT_SYNC_KEYS;
+  const sourceDir = profileDirForName(sourceProfile);
+  const sourceSettingsPath = join(sourceDir, "settings.json");
+  if (!existsSync(sourceSettingsPath)) return;
+
+  const sourceSettings = readJsonFile(sourceSettingsPath, {}, { warnOnly: true });
+  const targetSettingsPath = join(targetDir, "settings.json");
+  const targetSettings = readJsonFile(targetSettingsPath, {}, { warnOnly: true });
+
+  let changed = false;
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    if (!(key in sourceSettings)) {
+      if (key in targetSettings) {
+        delete targetSettings[key];
+        changed = true;
+      }
+      continue;
+    }
+    const nextValue = normalizeSyncedValue(key, sourceSettings[key], sourceDir);
+    if (JSON.stringify(targetSettings[key]) !== JSON.stringify(nextValue)) {
+      targetSettings[key] = nextValue;
+      changed = true;
+    }
+  }
+
+  if (changed) writeJsonFile(targetSettingsPath, targetSettings);
+}
+
 function printShellIntegration(profiles) {
   if (profiles.length === 0) {
     console.log(`# No profiles found in ${profilesBaseDir()}.
@@ -224,6 +330,7 @@ function main() {
 
   const profileDir = join(profilesBaseDir(), profile);
   mkdirSync(profileDir, { recursive: true });
+  applyProfileSync(profile);
 
   const extensionPath = resolve(dirname(fileURLToPath(import.meta.url)), "../extensions/auth-profile.ts");
   const env = { ...process.env };

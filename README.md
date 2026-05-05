@@ -110,7 +110,45 @@ Inside Pi, run:
 /auth-profile
 ```
 
-That reports the active profile, agent directory, auth file, and stored providers.
+That reports the active profile, agent directory, auth file, stored providers, and package/settings sync status.
+
+## Automatic settings sync
+
+Profiles can automatically copy selected settings from another profile before Pi starts. This is useful for sharing installed packages while keeping auth and model settings isolated.
+
+Configure it from inside a profiled Pi session:
+
+```text
+/profile-sync default
+/profile-sync work
+/profile-sync off
+```
+
+The command opens prompts for the keys to sync on every launch. Recommended defaults are:
+
+- `packages`
+- `npmCommand`
+
+Additional supported keys are `extensions`, `skills`, `prompts`, `themes`, and `enableSkillCommands`.
+
+The configuration is stored outside Pi's settings file:
+
+```text
+~/.pi/agent-profiles/<profile>/profile-sync.json
+```
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "from": "default",
+  "keys": ["packages", "npmCommand"],
+  "mode": "replace"
+}
+```
+
+On the next `pi-profile <profile>` launch, the launcher applies the sync before Pi loads packages and resources. Relative local package/resource paths from the source profile are converted to absolute paths so they still resolve correctly from the target profile.
 
 ## Login flow
 
