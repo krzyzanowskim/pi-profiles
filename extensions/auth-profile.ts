@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -11,7 +11,8 @@ const AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
 const STRICT_ENV = "PI_AUTH_PROFILE_STRICT_ENV";
 const PROFILES_DIR_ENV = "PI_AUTH_PROFILES_DIR";
-const SYNCABLE_KEYS = ["packages", "npmCommand", "extensions", "skills", "prompts", "themes", "enableSkillCommands"];
+const SYNCABLE_KEYS = ["packages", "npmCommand", "extensions", "skills", "prompts", "themes", "enableSkillCommands", "mcp"];
+const FILE_SYNC_KEYS = new Set(["mcp"]);
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
 const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
@@ -146,7 +147,47 @@ function syncCandidateKeys(config: ProfileSyncConfig, sourceSettings: Record<str
     return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
   }
 
-  return Object.keys(sourceSettings).filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+}
+
+function fileHash(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function syncMcpFile(sourceDir: string, targetDir: string, lastSyncedHashes: Record<string, string>, syncedKeys: Set<string>, autoOptOut: Set<string>): { fileChanged: boolean; stateChanged: boolean } {
+  const key = "mcp";
+  const sourcePath = join(sourceDir, "mcp.json");
+  const targetPath = join(targetDir, "mcp.json");
+  const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
+  const wasSynced = syncedKeys.has(key);
+  const hasTargetValue = existsSync(targetPath);
+
+  const targetChangedLocally = hadSyncedValue ? !hasTargetValue || fileHash(targetPath) !== lastSyncedHashes[key] : false;
+  if (targetChangedLocally) {
+    autoOptOut.add(key);
+    delete lastSyncedHashes[key];
+    syncedKeys.delete(key);
+    return { fileChanged: false, stateChanged: true };
+  }
+
+  if (!existsSync(sourcePath)) {
+    const fileChanged = wasSynced && hasTargetValue;
+    if (fileChanged) unlinkSync(targetPath);
+    delete lastSyncedHashes[key];
+    syncedKeys.delete(key);
+    return { fileChanged, stateChanged: wasSynced || hadSyncedValue };
+  }
+
+  const nextHash = fileHash(sourcePath);
+  const previousHash = lastSyncedHashes[key];
+  const fileChanged = !hasTargetValue || fileHash(targetPath) !== nextHash;
+  if (fileChanged) {
+    mkdirSync(targetDir, { recursive: true });
+    copyFileSync(sourcePath, targetPath);
+  }
+  lastSyncedHashes[key] = nextHash;
+  syncedKeys.add(key);
+  return { fileChanged, stateChanged: !wasSynced || previousHash !== nextHash || fileChanged };
 }
 
 function applyProfileSync(targetProfile: string): string[] {
@@ -183,6 +224,12 @@ function applyProfileSync(targetProfile: string): string[] {
 
   for (const key of candidateKeys) {
     if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+    if (key === "mcp") {
+      const result = syncMcpFile(sourceDir, targetDir, lastSyncedHashes as Record<string, string>, syncedKeys, autoOptOut);
+      if (result.fileChanged) changed.push(key);
+      if (result.stateChanged) configChanged = true;
+      continue;
+    }
 
     const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
     const wasSynced = syncedKeys.has(key);

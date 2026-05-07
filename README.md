@@ -124,7 +124,7 @@ Configure opt-outs from inside a profiled Pi session:
 /profile-sync off
 ```
 
-The command opens prompts for common keys such as `packages`, `npmCommand`, `extensions`, `skills`, `prompts`, `themes`, and `enableSkillCommands`. Turning a key off adds it to the profile's sync exclusions. Other non-auth settings continue to sync automatically.
+The command opens prompts for common keys such as `packages`, `npmCommand`, `extensions`, `skills`, `prompts`, `themes`, `enableSkillCommands`, and `mcp`. Turning a key off adds it to the profile's sync exclusions. Other non-auth settings continue to sync automatically.
 
 If a setting is changed directly in the profile after it was synced, the launcher treats that key as a local override and stops syncing it automatically. Run `/profile-sync <source>` again and enable that key to opt back in.
 
@@ -152,7 +152,7 @@ Example:
 }
 ```
 
-On the next `pi-profile <profile>` launch, the launcher applies the sync before Pi loads packages and resources. Relative local package/resource paths from the source profile are converted to absolute paths so they still resolve correctly from the target profile.
+On the next `pi-profile <profile>` launch, the launcher applies the sync before Pi loads packages and resources. Relative local package/resource paths from the source profile are converted to absolute paths so they still resolve correctly from the target profile. MCP server configuration is synced by copying `mcp.json`; generated MCP cache and onboarding files are intentionally left profile-local.
 
 ## Login flow
 

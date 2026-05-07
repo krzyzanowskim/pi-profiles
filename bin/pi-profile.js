@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
+const FILE_SYNC_KEYS = new Set(["mcp"]);
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
 const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
@@ -238,7 +239,47 @@ function syncCandidateKeys(config, sourceSettings) {
     return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
   }
 
-  return Object.keys(sourceSettings).filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+}
+
+function fileHash(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function syncMcpFile(sourceDir, targetDir, lastSyncedHashes, syncedKeys, autoOptOut) {
+  const key = "mcp";
+  const sourcePath = join(sourceDir, "mcp.json");
+  const targetPath = join(targetDir, "mcp.json");
+  const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
+  const wasSynced = syncedKeys.has(key);
+  const hasTargetValue = existsSync(targetPath);
+
+  const targetChangedLocally = hadSyncedValue ? !hasTargetValue || fileHash(targetPath) !== lastSyncedHashes[key] : false;
+  if (targetChangedLocally) {
+    autoOptOut.add(key);
+    delete lastSyncedHashes[key];
+    syncedKeys.delete(key);
+    return { fileChanged: false, stateChanged: true };
+  }
+
+  if (!existsSync(sourcePath)) {
+    const fileChanged = wasSynced && hasTargetValue;
+    if (fileChanged) unlinkSync(targetPath);
+    delete lastSyncedHashes[key];
+    syncedKeys.delete(key);
+    return { fileChanged, stateChanged: wasSynced || hadSyncedValue };
+  }
+
+  const nextHash = fileHash(sourcePath);
+  const previousHash = lastSyncedHashes[key];
+  const fileChanged = !hasTargetValue || fileHash(targetPath) !== nextHash;
+  if (fileChanged) {
+    mkdirSync(targetDir, { recursive: true });
+    copyFileSync(sourcePath, targetPath);
+  }
+  lastSyncedHashes[key] = nextHash;
+  syncedKeys.add(key);
+  return { fileChanged, stateChanged: !wasSynced || previousHash !== nextHash || fileChanged };
 }
 
 function applyProfileSync(targetProfile) {
@@ -275,6 +316,11 @@ function applyProfileSync(targetProfile) {
 
   for (const key of candidateKeys) {
     if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+    if (key === "mcp") {
+      const result = syncMcpFile(sourceDir, targetDir, lastSyncedHashes, syncedKeys, autoOptOut);
+      if (result.stateChanged) configChanged = true;
+      continue;
+    }
 
     const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
     const wasSynced = syncedKeys.has(key);
