@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -10,9 +11,9 @@ const AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
 const STRICT_ENV = "PI_AUTH_PROFILE_STRICT_ENV";
 const PROFILES_DIR_ENV = "PI_AUTH_PROFILES_DIR";
-const DEFAULT_SYNC_KEYS = ["packages", "npmCommand"];
 const SYNCABLE_KEYS = ["packages", "npmCommand", "extensions", "skills", "prompts", "themes", "enableSkillCommands"];
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
+const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
 type ProfileInfo = {
   profile: string | undefined;
@@ -29,7 +30,14 @@ type ProfileSyncConfig = {
   enabled?: boolean;
   from?: string;
   keys?: string[];
-  mode?: "replace";
+  exclude?: string[];
+  autoOptOut?: string[];
+  state?: {
+    lastSynced?: Record<string, unknown>;
+    lastSyncedHashes?: Record<string, string>;
+    syncedKeys?: string[];
+  };
+  mode?: "replace" | "all-except";
 };
 
 function expandHome(path: string): string {
@@ -77,6 +85,10 @@ function profileSyncConfigPath(profileDir: string): string {
   return join(profileDir, "profile-sync.json");
 }
 
+function profileSyncStatePath(profileDir: string): string {
+  return join(profileDir, "profile-sync-state.json");
+}
+
 function isLocalSource(source: string): boolean {
   return source === "." || source === ".." || source.startsWith("./") || source.startsWith("../") || source.startsWith("/") || source.startsWith("~/");
 }
@@ -114,13 +126,38 @@ function normalizeSyncedValue(key: string, value: unknown, sourceDir: string): u
   return value;
 }
 
+function stableEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function valueHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isAuthSettingKey(key: string): boolean {
+  return AUTH_SETTING_KEY_PATTERN.test(key);
+}
+
+function syncCandidateKeys(config: ProfileSyncConfig, sourceSettings: Record<string, unknown>): string[] {
+  const excluded = new Set(Array.isArray(config.exclude) ? config.exclude.filter((key): key is string => typeof key === "string") : []);
+  const autoOptOut = new Set(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key): key is string => typeof key === "string") : []);
+
+  if (Array.isArray(config.keys)) {
+    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  }
+
+  return Object.keys(sourceSettings).filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+}
+
 function applyProfileSync(targetProfile: string): string[] {
   const targetDir = profileDirForName(targetProfile);
-  const config = readJsonFile<ProfileSyncConfig>(profileSyncConfigPath(targetDir), {});
+  const configPath = profileSyncConfigPath(targetDir);
+  const statePath = profileSyncStatePath(targetDir);
+  const config = readJsonFile<ProfileSyncConfig>(configPath, {});
+  const persistedState = readJsonFile<NonNullable<ProfileSyncConfig["state"]> & { autoOptOut?: string[] }>(statePath, {});
   if (config.enabled === false) return [];
 
   const sourceProfile = config.from?.trim() || "default";
-  const keys = Array.isArray(config.keys) ? config.keys : DEFAULT_SYNC_KEYS;
   const sourceDir = profileDirForName(sourceProfile);
   const sourceSettingsPath = join(sourceDir, "settings.json");
   if (!existsSync(sourceSettingsPath)) return [];
@@ -128,24 +165,69 @@ function applyProfileSync(targetProfile: string): string[] {
   const sourceSettings = readJsonFile<Record<string, unknown>>(sourceSettingsPath, {});
   const targetSettingsPath = join(targetDir, "settings.json");
   const targetSettings = readJsonFile<Record<string, unknown>>(targetSettingsPath, {});
+  const state = { ...(config.state ?? {}), ...persistedState };
+  const legacyLastSynced = state.lastSynced && typeof state.lastSynced === "object" ? state.lastSynced : {};
+  const lastSyncedHashes = state.lastSyncedHashes && typeof state.lastSyncedHashes === "object" ? state.lastSyncedHashes : {};
+  for (const [key, value] of Object.entries(legacyLastSynced)) {
+    if (typeof lastSyncedHashes[key] !== "string") lastSyncedHashes[key] = valueHash(value);
+  }
+  const syncedKeys = new Set(Array.isArray(state.syncedKeys) ? state.syncedKeys.filter((key): key is string => typeof key === "string") : []);
+  const autoOptOut = new Set([
+    ...(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key): key is string => typeof key === "string") : []),
+    ...(Array.isArray(state.autoOptOut) ? state.autoOptOut.filter((key): key is string => typeof key === "string") : []),
+  ]);
 
   const changed: string[] = [];
-  for (const key of keys) {
-    if (!(key in sourceSettings)) {
-      if (key in targetSettings) {
+  let configChanged = false;
+  const candidateKeys = new Set([...syncCandidateKeys(config, sourceSettings), ...syncedKeys]);
+
+  for (const key of candidateKeys) {
+    if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+
+    const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
+    const wasSynced = syncedKeys.has(key);
+    const hasTargetValue = Object.prototype.hasOwnProperty.call(targetSettings, key);
+    const targetChangedLocally = hadSyncedValue
+      ? !hasTargetValue || valueHash(targetSettings[key]) !== lastSyncedHashes[key]
+      : hasTargetValue && (!Object.prototype.hasOwnProperty.call(sourceSettings, key) || !stableEqual(targetSettings[key], normalizeSyncedValue(key, sourceSettings[key], sourceDir)));
+
+    if (targetChangedLocally) {
+      autoOptOut.add(key);
+      delete lastSyncedHashes[key];
+      syncedKeys.delete(key);
+      configChanged = true;
+      continue;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(sourceSettings, key)) {
+      if (wasSynced && hasTargetValue) {
         delete targetSettings[key];
         changed.push(key);
       }
+      delete lastSyncedHashes[key];
+      syncedKeys.delete(key);
+      configChanged = true;
       continue;
     }
+
     const nextValue = normalizeSyncedValue(key, sourceSettings[key], sourceDir);
-    if (JSON.stringify(targetSettings[key]) !== JSON.stringify(nextValue)) {
+    if (!stableEqual(targetSettings[key], nextValue)) {
       targetSettings[key] = nextValue;
       changed.push(key);
     }
+    lastSyncedHashes[key] = valueHash(nextValue);
+    syncedKeys.add(key);
+    configChanged = true;
   }
 
   if (changed.length > 0) writeJsonFile(targetSettingsPath, targetSettings);
+  if (configChanged) {
+    writeJsonFile(statePath, { autoOptOut: [...autoOptOut].sort(), lastSyncedHashes, syncedKeys: [...syncedKeys].sort() });
+    if (existsSync(configPath) && (config.state || config.autoOptOut)) {
+      const { state: _state, autoOptOut: _autoOptOut, ...cleanConfig } = config;
+      writeJsonFile(configPath, cleanConfig);
+    }
+  }
   return changed;
 }
 
@@ -194,10 +276,21 @@ function providerSummary(ctx: ExtensionContext): string {
 
 function formatSyncConfig(targetProfile: string): string {
   const targetDir = profileDirForName(targetProfile);
-  const config = readJsonFile<ProfileSyncConfig>(profileSyncConfigPath(targetDir), {});
+  const configPath = profileSyncConfigPath(targetDir);
+  const config = readJsonFile<ProfileSyncConfig>(configPath, {});
+  const state = readJsonFile<NonNullable<ProfileSyncConfig["state"]> & { autoOptOut?: string[] }>(profileSyncStatePath(targetDir), {});
   if (config.enabled === false) return "Profile sync: disabled";
-  if (!config.from && !config.keys) return "Profile sync: not configured";
-  return `Profile sync: from ${config.from ?? "default"}; keys: ${(Array.isArray(config.keys) ? config.keys : DEFAULT_SYNC_KEYS).join(", ") || "none"}`;
+
+  const source = config.from ?? "default";
+  const excluded = Array.isArray(config.exclude) ? config.exclude : [];
+  const autoOptOut = [...(Array.isArray(config.autoOptOut) ? config.autoOptOut : []), ...(Array.isArray(state.autoOptOut) ? state.autoOptOut : [])];
+  const scope = Array.isArray(config.keys) ? `keys: ${config.keys.join(", ") || "none"}` : "all non-auth settings";
+  const suffix = [
+    excluded.length ? `excluded: ${excluded.join(", ")}` : undefined,
+    autoOptOut.length ? `local overrides: ${autoOptOut.join(", ")}` : undefined,
+  ].filter(Boolean).join("; ");
+
+  return `Profile sync: from ${source}; ${scope}${suffix ? `; ${suffix}` : ""}${existsSync(configPath) ? "" : " (default)"}`;
 }
 
 function formatInfo(info: ProfileInfo, ctx: ExtensionContext): string {
@@ -238,12 +331,7 @@ async function configureProfileSync(args: string, ctx: ExtensionContext) {
     return;
   }
 
-  let sourceProfile = requested.split(/\s+/)[0] || undefined;
-  if (!sourceProfile && ctx.hasUI) {
-    const choices = ["default", ...listProfiles().filter((profile) => profile !== targetProfile)];
-    sourceProfile = await ctx.ui.select("Sync settings from profile:", choices);
-  }
-  sourceProfile = sourceProfile || "default";
+  const sourceProfile = requested.split(/\s+/)[0] || "default";
   if (sourceProfile !== "default" && !validateProfileName(sourceProfile)) {
     ctx.ui.notify(`Invalid source profile: ${sourceProfile}`, "error");
     return;
@@ -254,37 +342,67 @@ async function configureProfileSync(args: string, ctx: ExtensionContext) {
   }
 
   const targetDir = profileDirForName(targetProfile);
+  const statePath = profileSyncStatePath(targetDir);
   const existing = readJsonFile<ProfileSyncConfig>(profileSyncConfigPath(targetDir), {});
-  const selected = new Set(existing.from === sourceProfile && existing.keys ? existing.keys : DEFAULT_SYNC_KEYS);
-  const keys: string[] = [];
+  const existingState = readJsonFile<NonNullable<ProfileSyncConfig["state"]> & { autoOptOut?: string[] }>(statePath, {});
+  const existingExcluded = new Set(existing.from === sourceProfile && Array.isArray(existing.exclude) ? existing.exclude : []);
+  const existingAutoOptOut = new Set([
+    ...(existing.from === sourceProfile && Array.isArray(existing.autoOptOut) ? existing.autoOptOut : []),
+    ...(existing.from === sourceProfile && Array.isArray(existingState.autoOptOut) ? existingState.autoOptOut : []),
+  ]);
+  const selected = new Set(
+    existing.from === sourceProfile && Array.isArray(existing.keys)
+      ? existing.keys
+      : SYNCABLE_KEYS.filter((key) => !existingExcluded.has(key) && !existingAutoOptOut.has(key)),
+  );
+  const exclude: string[] = [];
+  const enabledKeys: string[] = [];
 
   for (const key of SYNCABLE_KEYS) {
     const currently = selected.has(key) ? "currently on" : "currently off";
     const enabled = ctx.hasUI
       ? await ctx.ui.confirm(`Sync ${key}?`, `${key} is ${currently}. Enable automatic sync for this key from ${sourceProfile}?`)
       : selected.has(key);
-    if (enabled) keys.push(key);
+    if (enabled) enabledKeys.push(key);
+    else exclude.push(key);
   }
 
-  const config: ProfileSyncConfig = { enabled: true, from: sourceProfile, keys, mode: "replace" };
-  writeJsonFile(profileSyncConfigPath(targetDir), config);
+  const targetSettings = readJsonFile<Record<string, unknown>>(join(targetDir, "settings.json"), {});
+  const lastSyncedHashes = existingState.lastSyncedHashes && typeof existingState.lastSyncedHashes === "object" ? { ...existingState.lastSyncedHashes } : {};
+  const syncedKeys = new Set(Array.isArray(existingState.syncedKeys) ? existingState.syncedKeys : []);
+  for (const key of enabledKeys) {
+    if (Object.prototype.hasOwnProperty.call(targetSettings, key)) lastSyncedHashes[key] = valueHash(targetSettings[key]);
+    syncedKeys.add(key);
+  }
 
-  let message = `Profile sync configured from ${sourceProfile}: ${keys.length ? keys.join(", ") : "no keys"}.`;
-  if (keys.length > 0) {
-    const applyNow = ctx.hasUI ? await ctx.ui.confirm("Apply now?", "Apply these settings to the current profile now?") : false;
-    if (applyNow) {
-      const changed = applyProfileSync(targetProfile);
-      message += changed.length ? ` Synced now: ${changed.join(", ")}.` : " Nothing changed.";
-      if (changed.length > 0 && ctx.hasUI) {
-        const reload = await ctx.ui.confirm("Reload runtime?", "Reload extensions, skills, prompts, and themes now?");
-        const reloadFn = (ctx as unknown as { reload?: () => Promise<void> }).reload;
-        if (reload && typeof reloadFn === "function") {
-          await reloadFn.call(ctx);
-        }
+  const config: ProfileSyncConfig = {
+    enabled: true,
+    from: sourceProfile,
+    exclude,
+    mode: "all-except",
+  };
+  writeJsonFile(profileSyncConfigPath(targetDir), config);
+  writeJsonFile(statePath, {
+    autoOptOut: [...existingAutoOptOut].filter((key) => !enabledKeys.includes(key)).sort(),
+    lastSyncedHashes,
+    syncedKeys: [...syncedKeys].sort(),
+  });
+
+  const syncedDescription = exclude.length ? `all non-auth settings except ${exclude.join(", ")}` : "all non-auth settings";
+  let message = `Profile sync configured from ${sourceProfile}: ${syncedDescription}.`;
+  const applyNow = ctx.hasUI ? await ctx.ui.confirm("Apply now?", "Apply these settings to the current profile now?") : false;
+  if (applyNow) {
+    const changed = applyProfileSync(targetProfile);
+    message += changed.length ? ` Synced now: ${changed.join(", ")}.` : " Nothing changed.";
+    if (changed.length > 0 && ctx.hasUI) {
+      const reload = await ctx.ui.confirm("Reload runtime?", "Reload extensions, skills, prompts, and themes now?");
+      const reloadFn = (ctx as unknown as { reload?: () => Promise<void> }).reload;
+      if (reload && typeof reloadFn === "function") {
+        await reloadFn.call(ctx);
       }
-    } else {
-      message += " Restart Pi to apply automatically on launch.";
     }
+  } else {
+    message += " Restart Pi to apply automatically on launch.";
   }
 
   ctx.ui.notify(message, "info");

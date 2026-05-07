@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
-const DEFAULT_SYNC_KEYS = ["packages", "npmCommand"];
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
+const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
 const KNOWN_AUTH_ENV = [
   "ANTHROPIC_API_KEY",
@@ -177,6 +178,10 @@ function profileSyncConfigPath(profileDir) {
   return join(profileDir, "profile-sync.json");
 }
 
+function profileSyncStatePath(profileDir) {
+  return join(profileDir, "profile-sync-state.json");
+}
+
 function isLocalSource(source) {
   return source === "." || source === ".." || source.startsWith("./") || source.startsWith("../") || source.startsWith("/") || source.startsWith("~/");
 }
@@ -213,16 +218,38 @@ function normalizeSyncedValue(key, value, sourceDir) {
   return value;
 }
 
+function stableEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function valueHash(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isAuthSettingKey(key) {
+  return AUTH_SETTING_KEY_PATTERN.test(key);
+}
+
+function syncCandidateKeys(config, sourceSettings) {
+  const excluded = new Set(Array.isArray(config.exclude) ? config.exclude.filter((key) => typeof key === "string") : []);
+  const autoOptOut = new Set(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key) => typeof key === "string") : []);
+
+  if (Array.isArray(config.keys)) {
+    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  }
+
+  return Object.keys(sourceSettings).filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+}
+
 function applyProfileSync(targetProfile) {
   const targetDir = profileDirForName(targetProfile);
   const configPath = profileSyncConfigPath(targetDir);
-  if (!existsSync(configPath)) return;
-
+  const statePath = profileSyncStatePath(targetDir);
   const config = readJsonFile(configPath, {}, { warnOnly: true });
+  const persistedState = readJsonFile(statePath, {}, { warnOnly: true });
   if (config.enabled === false) return;
 
   const sourceProfile = typeof config.from === "string" && config.from.trim() ? config.from.trim() : "default";
-  const keys = Array.isArray(config.keys) ? config.keys : DEFAULT_SYNC_KEYS;
   const sourceDir = profileDirForName(sourceProfile);
   const sourceSettingsPath = join(sourceDir, "settings.json");
   if (!existsSync(sourceSettingsPath)) return;
@@ -230,25 +257,69 @@ function applyProfileSync(targetProfile) {
   const sourceSettings = readJsonFile(sourceSettingsPath, {}, { warnOnly: true });
   const targetSettingsPath = join(targetDir, "settings.json");
   const targetSettings = readJsonFile(targetSettingsPath, {}, { warnOnly: true });
+  const state = persistedState && typeof persistedState === "object" ? { ...(config.state && typeof config.state === "object" ? config.state : {}), ...persistedState } : config.state && typeof config.state === "object" ? config.state : {};
+  const legacyLastSynced = state.lastSynced && typeof state.lastSynced === "object" ? state.lastSynced : {};
+  const lastSyncedHashes = state.lastSyncedHashes && typeof state.lastSyncedHashes === "object" ? state.lastSyncedHashes : {};
+  for (const [key, value] of Object.entries(legacyLastSynced)) {
+    if (typeof lastSyncedHashes[key] !== "string") lastSyncedHashes[key] = valueHash(value);
+  }
+  const syncedKeys = new Set(Array.isArray(state.syncedKeys) ? state.syncedKeys.filter((key) => typeof key === "string") : []);
+  const autoOptOut = new Set([
+    ...(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key) => typeof key === "string") : []),
+    ...(Array.isArray(state.autoOptOut) ? state.autoOptOut.filter((key) => typeof key === "string") : []),
+  ]);
 
-  let changed = false;
-  for (const key of keys) {
-    if (typeof key !== "string") continue;
-    if (!(key in sourceSettings)) {
-      if (key in targetSettings) {
-        delete targetSettings[key];
-        changed = true;
-      }
+  let settingsChanged = false;
+  let configChanged = false;
+  const candidateKeys = new Set([...syncCandidateKeys(config, sourceSettings), ...syncedKeys]);
+
+  for (const key of candidateKeys) {
+    if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+
+    const hadSyncedValue = typeof lastSyncedHashes[key] === "string";
+    const wasSynced = syncedKeys.has(key);
+    const hasTargetValue = Object.prototype.hasOwnProperty.call(targetSettings, key);
+    const targetChangedLocally = hadSyncedValue
+      ? !hasTargetValue || valueHash(targetSettings[key]) !== lastSyncedHashes[key]
+      : hasTargetValue && (!Object.prototype.hasOwnProperty.call(sourceSettings, key) || !stableEqual(targetSettings[key], normalizeSyncedValue(key, sourceSettings[key], sourceDir)));
+
+    if (targetChangedLocally) {
+      autoOptOut.add(key);
+      delete lastSyncedHashes[key];
+      syncedKeys.delete(key);
+      configChanged = true;
       continue;
     }
-    const nextValue = normalizeSyncedValue(key, sourceSettings[key], sourceDir);
-    if (JSON.stringify(targetSettings[key]) !== JSON.stringify(nextValue)) {
-      targetSettings[key] = nextValue;
-      changed = true;
+
+    if (!Object.prototype.hasOwnProperty.call(sourceSettings, key)) {
+      if (wasSynced && hasTargetValue) {
+        delete targetSettings[key];
+        settingsChanged = true;
+      }
+      delete lastSyncedHashes[key];
+      syncedKeys.delete(key);
+      configChanged = true;
+      continue;
     }
+
+    const nextValue = normalizeSyncedValue(key, sourceSettings[key], sourceDir);
+    if (!stableEqual(targetSettings[key], nextValue)) {
+      targetSettings[key] = nextValue;
+      settingsChanged = true;
+    }
+    lastSyncedHashes[key] = valueHash(nextValue);
+    syncedKeys.add(key);
+    configChanged = true;
   }
 
-  if (changed) writeJsonFile(targetSettingsPath, targetSettings);
+  if (settingsChanged) writeJsonFile(targetSettingsPath, targetSettings);
+  if (configChanged) {
+    writeJsonFile(statePath, { autoOptOut: [...autoOptOut].sort(), lastSyncedHashes, syncedKeys: [...syncedKeys].sort() });
+    if (existsSync(configPath) && (config.state || config.autoOptOut)) {
+      const { state: _state, autoOptOut: _autoOptOut, ...cleanConfig } = config;
+      writeJsonFile(configPath, cleanConfig);
+    }
+  }
 }
 
 function printShellIntegration(profiles) {

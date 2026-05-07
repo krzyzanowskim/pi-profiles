@@ -114,9 +114,9 @@ That reports the active profile, agent directory, auth file, stored providers, a
 
 ## Automatic settings sync
 
-Profiles can automatically copy selected settings from another profile before Pi starts. This is useful for sharing installed packages while keeping auth and model settings isolated.
+Profiles automatically copy non-auth settings from another profile before Pi starts. By default, a profile syncs all non-auth settings from `default`; auth storage stays isolated per profile.
 
-Configure it from inside a profiled Pi session:
+Configure opt-outs from inside a profiled Pi session:
 
 ```text
 /profile-sync default
@@ -124,17 +124,20 @@ Configure it from inside a profiled Pi session:
 /profile-sync off
 ```
 
-The command opens prompts for the keys to sync on every launch. Recommended defaults are:
+The command opens prompts for common keys such as `packages`, `npmCommand`, `extensions`, `skills`, `prompts`, `themes`, and `enableSkillCommands`. Turning a key off adds it to the profile's sync exclusions. Other non-auth settings continue to sync automatically.
 
-- `packages`
-- `npmCommand`
+If a setting is changed directly in the profile after it was synced, the launcher treats that key as a local override and stops syncing it automatically. Run `/profile-sync <source>` again and enable that key to opt back in.
 
-Additional supported keys are `extensions`, `skills`, `prompts`, `themes`, and `enableSkillCommands`.
-
-The configuration is stored outside Pi's settings file:
+The manual sync configuration is stored outside Pi's settings file:
 
 ```text
 ~/.pi/agent-profiles/<profile>/profile-sync.json
+```
+
+The launcher keeps local override detection metadata separately in:
+
+```text
+~/.pi/agent-profiles/<profile>/profile-sync-state.json
 ```
 
 Example:
@@ -143,8 +146,9 @@ Example:
 {
   "enabled": true,
   "from": "default",
-  "keys": ["packages", "npmCommand"],
-  "mode": "replace"
+  "exclude": ["theme"],
+  "autoOptOut": ["defaultModel"],
+  "mode": "all-except"
 }
 ```
 
