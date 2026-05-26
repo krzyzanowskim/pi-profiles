@@ -282,6 +282,39 @@ function syncMcpFile(sourceDir, targetDir, lastSyncedHashes, syncedKeys, autoOpt
   return { fileChanged, stateChanged: !wasSynced || previousHash !== nextHash || fileChanged };
 }
 
+function isProfilesPackageSource(source) {
+  if (typeof source !== "string") return false;
+  if (source.startsWith("npm:@krzyzanowskim/pi-profiles")) return true;
+  return resolve(expandHome(source)) === resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+function packageEntryLoadsAuthExtension(entry) {
+  const source = typeof entry === "string" ? entry : entry && typeof entry === "object" ? entry.source : undefined;
+  if (!isProfilesPackageSource(source)) return false;
+  if (typeof entry === "string") return true;
+
+  const extensions = entry.extensions;
+  if (extensions === undefined) return true;
+  if (!Array.isArray(extensions)) return true;
+  if (extensions.length === 0) return false;
+
+  const authExtension = "extensions/auth-profile.ts";
+  return !extensions.some((pattern) => typeof pattern === "string" && (pattern === `-${authExtension}` || pattern === `!${authExtension}` || pattern === "-./extensions/auth-profile.ts" || pattern === "!./extensions/auth-profile.ts"));
+}
+
+function settingsLoadsAuthExtension(settings, extensionPath) {
+  const packages = Array.isArray(settings.packages) ? settings.packages : [];
+  if (packages.some(packageEntryLoadsAuthExtension)) return true;
+
+  const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
+  const resolvedExtensionPath = resolve(extensionPath);
+  return extensions.some((entry) => {
+    if (typeof entry !== "string") return false;
+    const normalized = entry.startsWith("-") || entry.startsWith("!") ? entry.slice(1) : entry;
+    return resolve(expandHome(normalized)) === resolvedExtensionPath;
+  });
+}
+
 function applyProfileSync(targetProfile) {
   const targetDir = profileDirForName(targetProfile);
   const configPath = profileSyncConfigPath(targetDir);
@@ -471,9 +504,13 @@ function main() {
   }
 
   const piBinary = process.env.PI_BINARY || "pi";
+  const profileSettings = readJsonFile(join(profileDir, "settings.json"), {}, { warnOnly: true });
+  const authExtensionAlreadyConfigured = settingsLoadsAuthExtension(profileSettings, extensionPath);
   const childArgs = PI_SUBCOMMANDS.has(piArgs[0])
     ? piArgs
-    : ["--auth-profile", profile, "--extension", extensionPath, ...piArgs];
+    : authExtensionAlreadyConfigured
+      ? ["--auth-profile", profile, ...piArgs]
+      : ["--auth-profile", profile, "--extension", extensionPath, ...piArgs];
 
   const child = spawn(piBinary, childArgs, {
     stdio: "inherit",

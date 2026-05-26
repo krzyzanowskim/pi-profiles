@@ -36,6 +36,8 @@ pi-profile personal
 pi-profile work
 ```
 
+Do **not** install this launcher with `pi install npm:@krzyzanowskim/pi-profiles`. `pi install` only installs Pi package resources into Pi settings; it does not put the `pi-profile` launcher on your shell `PATH`, and it can duplicate/conflict with the npm/mise installation. Use `mise use -g ...`, `npm install -g ...`, or `npm link` instead.
+
 ### Local development install
 
 From this directory:
