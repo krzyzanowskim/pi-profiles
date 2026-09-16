@@ -126,7 +126,7 @@ Configure opt-outs from inside a profiled Pi session:
 /profile-sync off
 ```
 
-The command opens prompts for common keys such as `packages`, `npmCommand`, `extensions`, `skills`, `prompts`, `themes`, `enableSkillCommands`, and `mcp`. Turning a key off adds it to the profile's sync exclusions. Other non-auth settings continue to sync automatically.
+The command opens prompts for common keys such as `packages`, `npmCommand`, `extensions`, `skills`, `prompts`, `themes`, `enableSkillCommands`, and `mcp`. Turning a key off adds it to the profile's sync exclusions. Other non-auth settings continue to sync automatically. `defaultModel`, `defaultProvider`, `defaultThinkingLevel`, `modelThinkingLevels`, and `enabledModels` never sync; each profile keeps its own selected model.
 
 If a setting is changed directly in the profile after it was synced, the launcher treats that key as a local override and stops syncing it automatically. Run `/profile-sync <source>` again and enable that key to opt back in.
 
@@ -149,7 +149,6 @@ Example:
   "enabled": true,
   "from": "default",
   "exclude": ["theme"],
-  "autoOptOut": ["defaultModel"],
   "mode": "all-except"
 }
 ```
@@ -213,11 +212,12 @@ Normal Pi `--session-dir <dir>` still works and takes precedence for that run, b
 
 ## Pi package commands
 
-Pi package commands such as `list`, `install`, `remove`, `uninstall`, `update`, and `config` must be the first argument passed to the real `pi` binary. The launcher preserves that shape, so commands like this work like regular Pi while using the selected profile's settings directory:
+Pi package and auth commands such as `list`, `install`, `remove`, `uninstall`, `update`, `config`, and `auth` must be the first argument passed to the real `pi` binary. The launcher preserves that shape, so commands like this work like regular Pi while using the selected profile's settings directory:
 
 ```bash
 pi-profile work list
 pi-profile work install <source>
+pi-profile work auth check --provider xai
 ```
 
 ## Publishing

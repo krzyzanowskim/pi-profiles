@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -14,6 +14,7 @@ const PROFILES_DIR_ENV = "PI_AUTH_PROFILES_DIR";
 const SYNCABLE_KEYS = ["packages", "npmCommand", "extensions", "skills", "prompts", "themes", "enableSkillCommands", "mcp"];
 const FILE_SYNC_KEYS = new Set(["mcp"]);
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
+const NEVER_SYNC_KEYS = new Set(["defaultModel", "defaultProvider", "defaultThinkingLevel", "modelThinkingLevels", "enabledModels"]);
 const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
 type ProfileInfo = {
@@ -139,15 +140,19 @@ function isAuthSettingKey(key: string): boolean {
   return AUTH_SETTING_KEY_PATTERN.test(key);
 }
 
+function shouldSkipSyncKey(key: string): boolean {
+  return NEVER_SYNC_KEYS.has(key) || isAuthSettingKey(key);
+}
+
 function syncCandidateKeys(config: ProfileSyncConfig, sourceSettings: Record<string, unknown>): string[] {
   const excluded = new Set(Array.isArray(config.exclude) ? config.exclude.filter((key): key is string => typeof key === "string") : []);
   const autoOptOut = new Set(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key): key is string => typeof key === "string") : []);
 
   if (Array.isArray(config.keys)) {
-    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !shouldSkipSyncKey(key));
   }
 
-  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !shouldSkipSyncKey(key));
 }
 
 function fileHash(path: string): string {
@@ -223,7 +228,7 @@ function applyProfileSync(targetProfile: string): string[] {
   const candidateKeys = new Set([...syncCandidateKeys(config, sourceSettings), ...syncedKeys]);
 
   for (const key of candidateKeys) {
-    if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+    if (typeof key !== "string" || shouldSkipSyncKey(key) || autoOptOut.has(key)) continue;
     if (key === "mcp") {
       const result = syncMcpFile(sourceDir, targetDir, lastSyncedHashes as Record<string, string>, syncedKeys, autoOptOut);
       if (result.fileChanged) changed.push(key);
@@ -316,9 +321,16 @@ function getProfileInfo(pi: ExtensionAPI): ProfileInfo {
   };
 }
 
-function providerSummary(ctx: ExtensionContext): string {
-  const providers = ctx.modelRegistry.authStorage.list().sort();
-  return providers.length === 0 ? "none stored yet" : providers.join(", ");
+function providerSummary(authPath: string | undefined): string {
+  if (!authPath || !existsSync(authPath)) return "none stored yet";
+  try {
+    const data = JSON.parse(readFileSync(authPath, "utf8")) as unknown;
+    if (!data || typeof data !== "object") return "none stored yet";
+    const providers = Object.keys(data).sort();
+    return providers.length === 0 ? "none stored yet" : providers.join(", ");
+  } catch {
+    return "none stored yet";
+  }
 }
 
 function formatSyncConfig(targetProfile: string): string {
@@ -340,13 +352,13 @@ function formatSyncConfig(targetProfile: string): string {
   return `Profile sync: from ${source}; ${scope}${suffix ? `; ${suffix}` : ""}${existsSync(configPath) ? "" : " (default)"}`;
 }
 
-function formatInfo(info: ProfileInfo, ctx: ExtensionContext): string {
+function formatInfo(info: ProfileInfo): string {
   const lines = [
     `Auth profile: ${info.profile ?? "(not set)"}`,
     `Agent dir: ${info.agentDir ?? "(default ~/.pi/agent)"}`,
     `Auth file: ${info.authPath ?? "(default auth.json)"}`,
     `Session dir: ${info.sessionDir ?? "(profile/default)"}`,
-    `Stored providers: ${providerSummary(ctx)}`,
+    `Stored providers: ${providerSummary(info.authPath)}`,
     `Global env auth cleared by launcher: ${info.strictEnv ? "yes" : "no"}`,
   ];
 
@@ -363,7 +375,7 @@ function formatInfo(info: ProfileInfo, ctx: ExtensionContext): string {
   return lines.join("\n");
 }
 
-async function configureProfileSync(args: string, ctx: ExtensionContext) {
+async function configureProfileSync(args: string, ctx: ExtensionCommandContext) {
   const targetProfile = process.env[PROFILE_ENV]?.trim();
   if (!targetProfile) {
     ctx.ui.notify("No active profile. Start Pi with pi-profile first.", "error");
@@ -443,10 +455,7 @@ async function configureProfileSync(args: string, ctx: ExtensionContext) {
     message += changed.length ? ` Synced now: ${changed.join(", ")}.` : " Nothing changed.";
     if (changed.length > 0 && ctx.hasUI) {
       const reload = await ctx.ui.confirm("Reload runtime?", "Reload extensions, skills, prompts, and themes now?");
-      const reloadFn = (ctx as unknown as { reload?: () => Promise<void> }).reload;
-      if (reload && typeof reloadFn === "function") {
-        await reloadFn.call(ctx);
-      }
+      if (reload) await ctx.reload();
     }
   } else {
     message += " Restart Pi to apply automatically on launch.";
@@ -455,29 +464,17 @@ async function configureProfileSync(args: string, ctx: ExtensionContext) {
   ctx.ui.notify(message, "info");
 }
 
-function isProfileFlagConflict(error: unknown): boolean {
-  return error instanceof Error && error.message.includes(`Flag "--${PROFILE_FLAG}" conflicts with`);
-}
-
-function registerProfileFlag(pi: ExtensionAPI) {
-  try {
-    pi.registerFlag(PROFILE_FLAG, {
-      type: "string",
-      description: "Name of the auth profile selected by the pi-profile launcher.",
-    });
-  } catch (error) {
-    if (!isProfileFlagConflict(error)) throw error;
-  }
-}
-
 export default function authProfileExtension(pi: ExtensionAPI) {
-  registerProfileFlag(pi);
+  pi.registerFlag(PROFILE_FLAG, {
+    type: "string",
+    description: "Name of the auth profile selected by the pi-profile launcher.",
+  });
 
   pi.registerCommand("auth-profile", {
     description: "Show the active Pi auth profile and auth storage location",
     handler: async (_args, ctx) => {
       const info = getProfileInfo(pi);
-      ctx.ui.notify(formatInfo(info, ctx), info.mismatch ? "warning" : "info");
+      ctx.ui.notify(formatInfo(info), info.mismatch ? "warning" : "info");
     },
   });
 

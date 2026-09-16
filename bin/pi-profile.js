@@ -6,9 +6,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
+const PI_SUBCOMMANDS = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth"]);
 const FILE_SYNC_KEYS = new Set(["mcp"]);
 const RESOURCE_SYNC_KEYS = new Set(["extensions", "skills", "prompts", "themes"]);
+const NEVER_SYNC_KEYS = new Set(["defaultModel", "defaultProvider", "defaultThinkingLevel", "modelThinkingLevels", "enabledModels"]);
 const AUTH_SETTING_KEY_PATTERN = /auth|oauth|token|api[-_]?key|secret|credential|password/i;
 
 const KNOWN_AUTH_ENV = [
@@ -231,15 +232,19 @@ function isAuthSettingKey(key) {
   return AUTH_SETTING_KEY_PATTERN.test(key);
 }
 
+function shouldSkipSyncKey(key) {
+  return NEVER_SYNC_KEYS.has(key) || isAuthSettingKey(key);
+}
+
 function syncCandidateKeys(config, sourceSettings) {
   const excluded = new Set(Array.isArray(config.exclude) ? config.exclude.filter((key) => typeof key === "string") : []);
   const autoOptOut = new Set(Array.isArray(config.autoOptOut) ? config.autoOptOut.filter((key) => typeof key === "string") : []);
 
   if (Array.isArray(config.keys)) {
-    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+    return config.keys.filter((key) => typeof key === "string" && !excluded.has(key) && !autoOptOut.has(key) && !shouldSkipSyncKey(key));
   }
 
-  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !isAuthSettingKey(key));
+  return [...Object.keys(sourceSettings), ...FILE_SYNC_KEYS].filter((key) => !excluded.has(key) && !autoOptOut.has(key) && !shouldSkipSyncKey(key));
 }
 
 function fileHash(path) {
@@ -348,7 +353,7 @@ function applyProfileSync(targetProfile) {
   const candidateKeys = new Set([...syncCandidateKeys(config, sourceSettings), ...syncedKeys]);
 
   for (const key of candidateKeys) {
-    if (typeof key !== "string" || isAuthSettingKey(key) || autoOptOut.has(key)) continue;
+    if (typeof key !== "string" || shouldSkipSyncKey(key) || autoOptOut.has(key)) continue;
     if (key === "mcp") {
       const result = syncMcpFile(sourceDir, targetDir, lastSyncedHashes, syncedKeys, autoOptOut);
       if (result.stateChanged) configChanged = true;
