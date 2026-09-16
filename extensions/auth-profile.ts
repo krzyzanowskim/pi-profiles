@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -455,11 +455,23 @@ async function configureProfileSync(args: string, ctx: ExtensionContext) {
   ctx.ui.notify(message, "info");
 }
 
+function isProfileFlagConflict(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(`Flag "--${PROFILE_FLAG}" conflicts with`);
+}
+
+function registerProfileFlag(pi: ExtensionAPI) {
+  try {
+    pi.registerFlag(PROFILE_FLAG, {
+      type: "string",
+      description: "Name of the auth profile selected by the pi-profile launcher.",
+    });
+  } catch (error) {
+    if (!isProfileFlagConflict(error)) throw error;
+  }
+}
+
 export default function authProfileExtension(pi: ExtensionAPI) {
-  pi.registerFlag(PROFILE_FLAG, {
-    type: "string",
-    description: "Name of the auth profile selected by the pi-profile launcher.",
-  });
+  registerProfileFlag(pi);
 
   pi.registerCommand("auth-profile", {
     description: "Show the active Pi auth profile and auth storage location",
